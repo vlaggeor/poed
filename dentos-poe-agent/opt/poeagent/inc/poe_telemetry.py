@@ -14,5 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 '''
 
-POE_AGENT_VERSION = "0.7.0"
-POE_CONFIG_VERSION = "1.2.0"
+
+import errno
+import json
+import os
+
+from agent_constants import AgentConstants
+from poe_common import print_stderr
+
+
+def publish_metrics(metric_name: str, metric_value: int) -> bool:
+    pass

@@ -1,171 +1,253 @@
-
+import time
 from collections import OrderedDict
-from poe_driver_pd69200_def import *
+
+from agent_constants import AgentConstants
+from i2c_driver import I2cDriver
+from pd69200.poe_driver import PoeDriver_microsemi_pd69200
+from pd69200.poe_driver_def import (
+    POE_PD69200_BT_MSG_DATA_PORT_MODE_TPPL,
+    POE_PD69200_BT_MSG_DATA_PORT_OP_MODE_4P_30W_2P_30W,
+    POE_PD69200_BT_MSG_DATA_PORT_OP_MODE_4P_60W_2P_30W,
+)
 from poe_common import *
-from poe_common import print_stderr
+from poe_log import PoeLog
+from poe_platform import PoePlatform
 from smbus2 import SMBus, i2c_msg
 
-import os
-import sys
-import time
-import fcntl
-import poe_driver_pd69200 as PoeDrv
 
-def get_poe_platform():
-    return PoePlatform_accton_as4564_26p()
-
-class PoePlatform_accton_as4564_26p(PoeDrv.PoeDriver_microsemi_pd69200):
-    def __init__(self):
-        PoeDrv.PoeDriver_microsemi_pd69200.__init__(self)
-        self.log = PoeLog()
-        self._total_poe_port = 24
-        self._i2c_bus = 1
-        self._i2c_addr = 0x3C
-        self._poe_bus = SMBus(self._i2c_bus)
-        # Add read 15byte first to cleanup buffer
-        self.plat_poe_read()
-        self._4wire_bt = self.support_4wire_bt(3)
-        # item in matrix: (logic port, phy port a,  phy port b)
-        self._default_matrix = [
-            (0, 4, 0xff), (1, 5, 0xff), (2, 6, 0xff), (3, 7, 0xff),
-            (4, 1, 0xff), (5, 2, 0xff), (6, 3, 0xff), (7, 0, 0xff),
-            (8, 12, 0xff), (9, 13, 0xff), (10, 14, 0xff), (11, 15, 0xff),
-            (12, 11, 0xff), (13, 10, 0xff), (14, 9, 0xff), (15, 8, 0xff),
-            (16, 22, 21), (17, 20, 23), (18, 19, 18), (19, 17, 16),
-            (20, 30, 29), (21, 28, 31), (22, 27, 26), (23, 25, 24),
-            (24, 0xff, 0xff), (25, 0xff, 0xff), (26, 0xff, 0xff), (27, 0xff, 0xff),
-            (28, 0xff, 0xff), (29, 0xff, 0xff), (30, 0xff, 0xff), (31, 0xff, 0xff),
-            (32, 0xff, 0xff), (33, 0xff, 0xff), (34, 0xff, 0xff), (35, 0xff, 0xff),
-            (36, 0xff, 0xff), (37, 0xff, 0xff), (38, 0xff, 0xff), (39, 0xff, 0xff),
-            (40, 0xff, 0xff), (41, 0xff, 0xff), (42, 0xff, 0xff), (43, 0xff, 0xff),
-            (44, 0xff, 0xff), (45, 0xff, 0xff), (46, 0xff, 0xff), (47, 0xff, 0xff)]
-
-        self._max_shutdown_vol = 0x0249 # 58.5 V
-        self._min_shutdown_vol = 0x01E0 # 48.0 V
+class As4564_26p(PoePlatform):
+    # Accton AS4564-26P
+    def __init__(self) -> None:
+        self._echo = 0x00
+        self._max_shutdown_vol = 0x0249  # 58.5 V
+        self._min_shutdown_vol = 0x01E0  # 48.0 V
         self._guard_band = 0x0A
         self._default_power_banks = [(1, 520)]
+        self._bus_driver = I2cDriver(i2c_bus=0x01, i2c_addr=0x3C)
+        self._port_count = 24
+        PoeDriver_microsemi_pd69200.__init__(
+            self,
+            self._bus_driver,
+            self.port_count(),
+            self._max_shutdown_vol,
+            self._min_shutdown_vol,
+            self._guard_band,
+            self.power_bank_to_str,
+        )
+        self._log = PoeLog()
 
-    def total_poe_port(self):
-        return self._total_poe_port
+        # Clear the I2C buffer.
+        self._bus_driver.read_message()
 
-    def _bus(self):
-        if self._poe_bus.fd is None:
-            self._poe_bus = SMBus(self._poe_bus)
-        return self._poe_bus
+        # Mapping: (logical port, phy port a,  phy port b)
+        self._port_matrix = [
+            (0, 4, 0xFF),
+            (1, 5, 0xFF),
+            (2, 6, 0xFF),
+            (3, 7, 0xFF),
+            (4, 1, 0xFF),
+            (5, 2, 0xFF),
+            (6, 3, 0xFF),
+            (7, 0, 0xFF),
+            (8, 12, 0xFF),
+            (9, 13, 0xFF),
+            (10, 14, 0xFF),
+            (11, 15, 0xFF),
+            (12, 11, 0xFF),
+            (13, 10, 0xFF),
+            (14, 9, 0xFF),
+            (15, 8, 0xFF),
+            (16, 22, 21),
+            (17, 20, 23),
+            (18, 19, 18),
+            (19, 17, 16),
+            (20, 30, 29),
+            (21, 28, 31),
+            (22, 27, 26),
+            (23, 25, 24),
+            (24, 0xFF, 0xFF),
+            (25, 0xFF, 0xFF),
+            (26, 0xFF, 0xFF),
+            (27, 0xFF, 0xFF),
+            (28, 0xFF, 0xFF),
+            (29, 0xFF, 0xFF),
+            (30, 0xFF, 0xFF),
+            (31, 0xFF, 0xFF),
+            (32, 0xFF, 0xFF),
+            (33, 0xFF, 0xFF),
+            (34, 0xFF, 0xFF),
+            (35, 0xFF, 0xFF),
+            (36, 0xFF, 0xFF),
+            (37, 0xFF, 0xFF),
+            (38, 0xFF, 0xFF),
+            (39, 0xFF, 0xFF),
+            (40, 0xFF, 0xFF),
+            (41, 0xFF, 0xFF),
+            (42, 0xFF, 0xFF),
+            (43, 0xFF, 0xFF),
+            (44, 0xFF, 0xFF),
+            (45, 0xFF, 0xFF),
+            (46, 0xFF, 0xFF),
+            (47, 0xFF, 0xFF),
+        ]
 
-    def _i2c_write(self, bus, msg, delay = 0.03):
-        write = i2c_msg.write(self._i2c_addr, msg)
-        bus.i2c_rdwr(write)
-        time.sleep(delay)
+        # Minimum firmware major for BT support is 3.x
+        self.supports_bt_protocol(3)
 
-    def _i2c_read(self, bus, size = 15):
-        read = i2c_msg.read(self._i2c_addr, size)
-        bus.i2c_rdwr(read)
-        msg = list(read)
-        return msg
-
-    def plat_poe_write(self, msg, delay):
-        return self._i2c_write(self._bus(), msg, delay)
-
-    def plat_poe_read(self):
-        return self._i2c_read(self._bus())
-
-    def bus_lock(self):
-        fcntl.flock(self._bus().fd, fcntl.LOCK_EX)
-
-    def bus_unlock(self):
-        fcntl.flock(self._bus().fd, fcntl.LOCK_UN)
-
-    def init_poe(self, config_in=None):
-        ret_item = OrderedDict()
-        # Clean buffers to reduce retry time
-        self.plat_poe_read()
-
-        # Fast compare active and temp matrix
-        if fast_temp_matrix_compare(self._default_matrix, self) == False:
-            prog_global_matrix = True
-        else:
-            prog_global_matrix = False
-
-        # Port result list
-        set_port_item = dict()
-        # Default values
-        set_port_item["set_port_params"] = []
-        set_port_item["set_temp_matrix"] = []
-        ret_item["set_power_bank"] = []
-        ret_item["set_op_mode"] = []
-        result_prog_matrix = None
-        result_save_sys = None
-
-
-        # Create default parameter (Disable, low priority)
-        default_param = dict({
-            ENDIS: "disable",
-            PRIORITY: "low",
-        })
-
-        # Set Temporary Matrix and
-        for temp_matrix_mapping in self._default_matrix:
-            logic_port = temp_matrix_mapping[0]
-            phy_porta = temp_matrix_mapping[1]
-            phy_portb = temp_matrix_mapping[2]
-            if config_in == None:
-                port = self.get_poe_port(logic_port)
-                result = port.set_all_params(default_param)
-                set_port_item["set_port_params"].append({
-                        "idx": logic_port,
-                        CMD_RESULT_RET: result
-                })
-            elif config_in == True:
-                # Preserve current state
-                pass
-
-            if prog_global_matrix == True:
-                result = self.set_temp_matrix(logic_port, phy_porta, phy_portb)
-                set_port_item["set_temp_matrix"].append({
-                    "idx": logic_port,
-                    CMD_RESULT_RET: result
-                })
-        ret_item["set_port_item"] = set_port_item
-
-        # Set Power Bank
-        for _power_bank in self._default_power_banks:
-            (bank, power_limit) = _power_bank
-            result = self.set_power_bank(bank, power_limit)
-            ret_item["set_power_bank"].append({
-                "setting": _power_bank,
-                CMD_RESULT_RET: result
-            })
-
-        # Set opration mode
-        for port_id in range(self.total_poe_port()):
-            if port_id <= 15:
-                result = self.set_bt_port_operation_mode(port_id, 0x9)
-            else:
-                result = self.set_bt_port_operation_mode(port_id, 0x1)
-            ret_item["set_op_mode"].append({
-                "idx": port_id,
-                CMD_RESULT_RET: result
-            })
+        # Map the default port power limit (in W) for the ECAs (class 6)
+        # and for cameras (class 3 and 4).
+        self._default_power_limits = {3: 14, 4: 14, 6: 45}
 
 
-        if prog_global_matrix == True:
-            print_stderr(
-                "Program active matrix, all ports will shutdown a while")
-            result_prog_matrix = self.program_active_matrix()
-            print_stderr(
-                "Program active matrix completed, save platform settings to chip")
-            result_save_sys = self.save_system_settings()
-            ret_item["program_active_matrix"] = {
-                CMD_RESULT_RET: result_prog_matrix
-            }
-            ret_item["save_system_settings"] = {
-                CMD_RESULT_RET: result_save_sys
-            }
-        return ret_item
+    def port_count(self) -> int:
+        """Get the total PoE port count
 
-    def bank_to_psu_str(self, bank):
-        powerSrc = "None"
+        Returns:
+        int: Port count
+        """
+        return self._port_count
+
+
+    @property
+    def default_power_limits(self) -> dict[int, int]:
+        """Get the port ranges default power limits
+
+        Returns:
+            dict[tuple[int, int], int]: Default limits as a dictionary
+        """
+        return self._default_power_limits
+
+    def init_poe(self, skip_port_init: bool) -> dict:
+        """Initialize the PoE ports, power bank config and
+        each port operation mode. If skip_port_init is true,
+        will not set the default port parameters
+
+        The global port matrix will be reprogrammed, only if
+        the actual matrix is different than the active port matrix.
+
+        Args:
+            skip_port_init (bool): Skip port init flag
+
+        Returns:
+            dict: Result dictionary. Contains the result for each
+            individual operation
+        """
+        # Clear the I2C buffer.
+        self._bus_driver.read_message()
+
+        # Default port params to initialize with.
+        port_default_params = {ENDIS: AgentConstants.ENABLE, PRIORITY: "low"}
+
+        # Determine if we need to reprogram the port matrix.
+        program_port_matrix = False
+        if not is_active_port_matrix_different(self._port_matrix, self.get_active_matrix):
+            program_port_matrix = True
+
+        # Configure the power bank power and voltage limits with the actual
+        # values.
+        result = OrderedDict()
+        result["power_bank"] = []
+        for power_bank in self._default_power_banks:
+            (bank_index, power_limit) = power_bank
+            result["power_bank"].append(
+                {
+                    "bank_details": power_bank,
+                    AgentConstants.CMD_RESULT_RET: self.set_power_bank(bank_index, power_limit),
+                }
+            )
+            # Confirm that the power bank was successfully configured.
+            power_bank_details = self.get_power_bank(bank_index)
+            result["power_bank"][-1][AgentConstants.CMD_RESULT_RET] = (
+                0 if power_bank_details[POWER_LIMIT] == power_limit else 1
+            )
+            # Prevent enabling or changing any port parameter if the power bank
+            # configuration failed.
+            if power_bank_details[POWER_LIMIT] != power_limit:
+                return result
+
+        set_port_results = {}
+        set_port_results["set_port_params"] = []
+        if program_port_matrix:
+            set_port_results["set_temp_matrix"] = []
+        if skip_port_init:
+            self._log.dbg("Skipping port initialization")
+        for ports in self._port_matrix:
+            port_index, phy_port_a, phy_port_b = ports
+            if not skip_port_init:
+                port = self.get_poe_port(port_index)
+                set_port_results["set_port_params"].append(
+                    {"idx": port_index, AgentConstants.CMD_RESULT_RET: port.set_all_params(port_default_params)}
+                )
+            if program_port_matrix:
+                # The temporary port matrix must be set before saving the
+                # global matrix.
+                self._log.info("Setting the temporary port matrix...")
+                set_port_results["set_temp_matrix"].append(
+                    {
+                        "idx": port_index,
+                        AgentConstants.CMD_RESULT_RET: self.set_temp_matrix(port_index, phy_port_a, phy_port_b),
+                    }
+                )
+        result["port_init"] = set_port_results
+
+        # Set port operation mode (i.e., limit first 16 ports to 30W/at, and
+        # the rest to 60W/bt).
+        # Configure the port power management to use the port TPPL for
+        # computing the available power.
+        result["port_operation_mode"] = []
+        for port_id in range(self.port_count()):
+            result["port_operation_mode"].append(
+                {
+                    "idx": port_id,
+                    AgentConstants.CMD_RESULT_RET: self.bt_set_port_params(
+                        port_id,
+                        POE_PD69200_BT_MSG_DATA_PORT_MODE_TPPL,
+                        (
+                            POE_PD69200_BT_MSG_DATA_PORT_OP_MODE_4P_60W_2P_30W
+                            if port_id > 15
+                            else POE_PD69200_BT_MSG_DATA_PORT_OP_MODE_4P_30W_2P_30W
+                        ),
+                    ),
+                }
+            )
+
+        if program_port_matrix:
+            # Persist global port matrix and save system settings.
+            self._log.notice("Ports will be shutdown while reprogramming " "the active port matrix")
+            result["program_active_matrix"] = {AgentConstants.CMD_RESULT_RET: self.program_active_matrix()}
+            self._log.notice("Programming port matrix completed, " "flushing platform settings...")
+            result["save_system_settings"] = {AgentConstants.CMD_RESULT_RET: self.save_system_settings()}
+
+        return result
+
+    def power_bank_to_str(self, bank: int) -> str:
+        """Stringify the given power bank as a combination
+        of one or more PSUs
+
+        Args:
+            bank (int): Power bank index
+
+        Returns:
+            str: Power bank as a string
+        """
+        psu = "None"
         if bank == 1:
-            powerSrc = "PSU1, PSU2"
-        return powerSrc
+            psu = "PSU1"
+        return psu
+
+    def _reset_cpld(self) -> None:
+        self._log.info("Resetting the PoE chipset via CPLD")
+
+        bus = SMBus(0x00)
+        for msg in (
+            i2c_msg.write(0x40, [0xE0, 0x01]),
+            i2c_msg.write(0x40, [0x11, 0xFB]),
+            i2c_msg.write(0x40, [0x11, 0xFF]),
+        ):
+            bus.i2c_rdwr(msg)
+
+        time.sleep(self._reset_poe_chip_delay)
+
+
+def get_poe_platform():
+    return As4564_26p()
